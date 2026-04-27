@@ -8,9 +8,10 @@ from __future__ import annotations
 import re
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, List, Optional, Sequence, Set
+from zoneinfo import ZoneInfo
 
 from http_client import get_with_retry
 from models import (
@@ -48,6 +49,7 @@ def _exclude_leagues_by_name(leagues: list, patterns: Optional[Sequence[str]]) -
 
 BASE_URL = "https://m.apuestas.codere.es/NavigationService"
 REFERER = "https://m.apuestas.codere.es/"
+MADRID = ZoneInfo("Europe/Madrid")
 
 _FOULS_KEYWORD = "falt"
 
@@ -72,6 +74,51 @@ def _extract_event_date(ev: dict) -> datetime | None:
     return None
 
 
+def _event_kickoff_utc(ev: dict) -> datetime | None:
+    """Net UTC del partido (aware) para comparar calendario en Madrid."""
+    for field in ("StartDate", "StarDate", "StartDateFormatted"):
+        raw = ev.get(field)
+        if not raw:
+            continue
+        m = _DOTNET_DATE_RE.search(str(raw))
+        if not m:
+            continue
+        try:
+            ms = int(m.group(1))
+        except ValueError:
+            continue
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    return None
+
+
+def _kickoff_date_madrid(ev: dict) -> date | None:
+    k = _event_kickoff_utc(ev)
+    if k is None:
+        return None
+    return k.astimezone(MADRID).date()
+
+
+def _normalize_get_events_row(item: dict) -> dict | None:
+    """GetEvents devuelve ParticipantHome/Away; unificamos al shape con Participants."""
+    eid = item.get("NodeId")
+    home = item.get("ParticipantHome")
+    away = item.get("ParticipantAway")
+    if not (eid and home and away):
+        return None
+    return {
+        "NodeId": eid,
+        "StartDate": item.get("StartDate"),
+        "Participants": [
+            {"LocalizedNames": {"LocalizedValues": [{"Value": home}]}},
+            {"LocalizedNames": {"LocalizedValues": [{"Value": away}]}},
+        ],
+    }
+
+
+def _target_date_madrid(day_difference: int) -> date:
+    return datetime.now(MADRID).date() + timedelta(days=int(day_difference))
+
+
 class CodereScraper:
     """
     Scraper para Codere (API móvil).
@@ -88,11 +135,38 @@ class CodereScraper:
         r.raise_for_status()
         return r.json()
 
+    def _events_via_get_events_for_day(
+        self, league_node_id: Any, day_difference: int
+    ) -> list[dict]:
+        """Si GetMultipleEventsByDate viene vacío, Codere sigue listando en Event/GetEvents."""
+        target = _target_date_madrid(day_difference)
+        data: list = []
+        for gt in ("1;18", ""):
+            time.sleep(0.1)
+            chunk = self._get(
+                "Event/GetEvents",
+                {"parentId": league_node_id, "gameTypes": gt},
+            )
+            if isinstance(chunk, list) and chunk:
+                data = chunk
+                break
+        out: list[dict] = []
+        for item in data:
+            ev = _normalize_get_events_row(item)
+            if not ev:
+                continue
+            ld = _kickoff_date_madrid(ev)
+            if ld is None or ld != target:
+                continue
+            out.append(ev)
+        return out
+
     def scrape_fouls_markets(
         self,
         league_name: Optional[str] = None,
         sport_handle: str = "soccer",
         exclude_league_substrings: Optional[Sequence[str]] = None,
+        day_difference: int = 0,
     ) -> List[OddsSnapshot]:
         """Mercados de FALTAS (ESTADÍSTICAS + nombre con 'falt')."""
         snapshots = self.scrape_markets(
@@ -100,6 +174,7 @@ class CodereScraper:
             sport_handle=sport_handle,
             target_categories={MarketType.ESTADISTICAS},
             exclude_league_substrings=exclude_league_substrings,
+            day_difference=day_difference,
         )
         return [s for s in snapshots if s.market_type == MarketType.FALTAS]
 
@@ -110,6 +185,7 @@ class CodereScraper:
         target_categories: Optional[Set[MarketType]] = None,
         exact_league_match: bool = False,
         exclude_league_substrings: Optional[Sequence[str]] = None,
+        day_difference: int = 0,
     ) -> List[OddsSnapshot]:
         cats_to_scrape = target_categories or self._target_categories
 
@@ -120,7 +196,12 @@ class CodereScraper:
 
         countries = self._get(
             "Home/GetCountriesByDate",
-            params={"sportHandle": sport_handle, "nodeId": sport["NodeId"]},
+            params={
+                "sportHandle": sport_handle,
+                "nodeId": sport["NodeId"],
+                "utcOffsetHours": 1,
+                "dayDifference": int(day_difference),
+            },
         )
         leagues = []
         for country in countries or []:
@@ -148,16 +229,31 @@ class CodereScraper:
                 "Event/GetMultipleEventsByDate",
                 params={
                     "utcOffsetHours": 1,
-                    "dayDifference": 0,
+                    "dayDifference": int(day_difference),
                     "parentids": league_node_id,
                     "gametypes": "1;18",
                 },
             )
-            events_list = (
-                events_data.get(str(league_node_id), [])
-                if isinstance(events_data, dict)
-                else []
-            )
+            events_list: list = []
+            if isinstance(events_data, dict):
+                lid = str(league_node_id)
+                events_list = events_data.get(lid) or []
+                if not events_list:
+                    try:
+                        events_list = (
+                            events_data.get(str(int(league_node_id))) or []
+                        )
+                    except (TypeError, ValueError):
+                        events_list = []
+                if not events_list:
+                    for k, v in events_data.items():
+                        if str(k) == lid and isinstance(v, list):
+                            events_list = v
+                            break
+            if not events_list:
+                events_list = self._events_via_get_events_for_day(
+                    league_node_id, day_difference
+                )
 
             for ev in events_list:
                 participants = ev.get("Participants", [])

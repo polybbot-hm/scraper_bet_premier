@@ -14,8 +14,14 @@ if str(_ROOT) not in sys.path:
 
 from codere_scraper import CodereScraper  # noqa: E402
 
-# Coincide con "Premier League - Urvalsdeild Karla" (Islandia); no la Premier inglesa.
-DEFAULT_EXCLUDE_LEAGUE_SUBSTRINGS = ("urvalsdeild",)
+# Otras competiciones con "Premier" en el nombre (no la Premier inglesa).
+DEFAULT_EXCLUDE_LEAGUE_SUBSTRINGS = (
+    "urvalsdeild",
+    "jamaica",
+    "egipto",
+    "israel",
+    "barein",
+)
 
 
 def _snapshot_dict(s):
@@ -71,6 +77,17 @@ def main() -> int:
     )
     p.add_argument("--sport", default="soccer", help="SportHandle Codere (default: soccer).")
     p.add_argument(
+        "--day-difference",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Día respecto a hoy (Europe/Madrid) para ligas y partidos Codere. "
+            "La Premier inglesa a veces solo aparece en el catálogo con N±1 respecto al calendario; "
+            "si ves 0 filas, prueba N+1 (ej. partido 1 may desde 28 abr → probar 3 y 4)."
+        ),
+    )
+    p.add_argument(
         "--fouls-only",
         action="store_true",
         help="Solo mercados de faltas (misma lógica que scrape_fouls_markets).",
@@ -123,6 +140,7 @@ def main() -> int:
             league_name=league,
             sport_handle=args.sport,
             exclude_league_substrings=exclude_tuple or None,
+            day_difference=args.day_difference,
         )
     else:
         rows = scraper.scrape_markets(
@@ -130,6 +148,7 @@ def main() -> int:
             sport_handle=args.sport,
             exact_league_match=args.exact_league,
             exclude_league_substrings=exclude_tuple or None,
+            day_difference=args.day_difference,
         )
 
     if args.limit > 0:
@@ -156,6 +175,11 @@ def main() -> int:
             return 1
 
     if args.supabase_only:
+        if not rows and args.day_difference != 0:
+            print(
+                "Sin datos (supabase-only): prueba --day-difference 0 si ese día no hay Premier.",
+                file=sys.stderr,
+            )
         n_ev = len({s.event.external_id for s in rows})
         print(f"Snapshots scrapeados: {len(rows)} | partidos únicos: {n_ev}")
         return 0 if rows else 0
@@ -169,6 +193,12 @@ def main() -> int:
 
     print(f"Snapshots: {len(rows)}")
     if not rows:
+        if args.day_difference != 0:
+            print(
+                "Sin datos: con --day-difference != 0 solo pides un día; "
+                "si ese día no hay Premier en Codere → 0 partidos. Prueba sin flag o --day-difference 0.",
+                file=sys.stderr,
+            )
         return 0
     n_events = len({s.event.external_id for s in rows})
     print(f"Partidos (eventos únicos): {n_events}")
