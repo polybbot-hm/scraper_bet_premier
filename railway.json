@@ -1,0 +1,14 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "python run.py --supabase-only",
+    "cronSchedule": "0 */3 * * *",
+    "restartPolicyType": "NEVER",
+    "numReplicas": 1,
+    "region": "europe-west4"
+  }
+}
