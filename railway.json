@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "python run.py --supabase-only",
+    "startCommand": "python run.py --supabase-only --exact-league --league \"Premier League\"",
     "cronSchedule": "0 */3 * * *",
     "restartPolicyType": "NEVER",
     "numReplicas": 1,
